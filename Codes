@@ -1,0 +1,910 @@
+( OPTIONAL FIRST THE AUTH FILES)
+import hashlib
+import hmac
+import base64
+import secrets
+
+class CIA_Level_Auth:
+    def __init__(self):
+        self.config = {
+            'iterations': 500000,
+            'salt_size': 32,
+            'dklen': 64,
+            'algorithm': 'sha512',
+        }
+
+    def _get_random_bytes(self, length):
+        return secrets.token_bytes(length)
+
+    def _pbkdf2(self, password, salt):
+        return hashlib.pbkdf2_hmac(
+            self.config['algorithm'],
+            password.encode('utf-8'),
+            salt,
+            self.config['iterations'],
+            dklen=self.config['dklen']
+        )
+
+    def encrypt(self, password):
+        salt = self._get_random_bytes(self.config['salt_size'])
+        key = self._pbkdf2(password, salt)
+        return base64.b64encode(salt + key).decode('utf-8')
+
+    def verify(self, password, stored_hash):
+        decoded = base64.b64decode(stored_hash.encode('utf-8'))
+        salt = decoded[:self.config['salt_size']]
+        stored_key = decoded[self.config['salt_size']:]
+        new_key = self._pbkdf2(password, salt)
+        return hmac.compare_digest(stored_key, new_key)
+    
+
+    
+-------------------------------------------------------------
+import base64
+import os
+from Crypto.Cipher import AES
+from Crypto.Hash import HMAC, SHA256
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
+
+
+class CipherChatEncryptor:
+    def __init__(self, secret_key: bytes, hmac_key: bytes = None):
+        if len(secret_key) != 32:
+            raise ValueError("AES key must be exactly 32 bytes (256 bits) long.")
+        self.secret_key = secret_key
+        self.hmac_key = hmac_key
+
+    def encrypt(self, plaintext: str) -> str:
+        iv = get_random_bytes(16)
+        cipher = AES.new(self.secret_key, AES.MODE_CBC, iv)
+        padded_data = pad(plaintext.encode('utf-8'), AES.block_size)
+        ciphertext = cipher.encrypt(padded_data)
+        encrypted_data = iv + ciphertext
+
+        if self.hmac_key:
+            hmac_value = HMAC.new(self.hmac_key, encrypted_data, digestmod=SHA256).digest()
+            encrypted_data += hmac_value
+
+        return base64.b64encode(encrypted_data).decode('utf-8')
+
+    def decrypt(self, encrypted_b64: str) -> str:
+        data = base64.b64decode(encrypted_b64)
+        if self.hmac_key:
+            hmac_received = data[-32:]
+            data = data[:-32]
+            expected_hmac = HMAC.new(self.hmac_key, data, digestmod=SHA256).digest()
+            if not hmac_received == expected_hmac:
+                raise ValueError("Message integrity check failed.")
+
+        iv = data[:16]
+        ciphertext = data[16:]
+        cipher = AES.new(self.secret_key, AES.MODE_CBC, iv)
+        decrypted_padded = cipher.decrypt(ciphertext)
+        return unpad(decrypted_padded, AES.block_size).decode('utf-8')
+
+    def generate_keys():
+        return {
+            'aes_key': base64.b64encode(get_random_bytes(32)).decode(),
+            'hmac_key': base64.b64encode(get_random_bytes(32)).decode()
+        }
+
+# ========== TESTING CODE ==========
+
+if __name__ == '__main__':
+    keys = CipherChatEncryptor.generate_keys()
+    aes_key = base64.b64decode(keys['aes_key'])
+    hmac_key = base64.b64decode(keys['hmac_key'])
+
+    print(f"Generated AES Key: {keys['aes_key']}")
+    print(f"Generated HMAC Key: {keys['hmac_key']}")
+
+    crypto = CipherChatEncryptor(aes_key, hmac_key)
+
+    message = "Highly confidential CIA-level message transmission ✅"
+    encrypted = crypto.encrypt(message)
+    decrypted = crypto.decrypt(encrypted)
+
+    print("\n🔐 Encrypted Message:")
+    print(encrypted)
+    print("\n✅ Decrypted Message:")
+    print(decrypted)
+
+    # Tampering test (optional)
+    try:
+        tampered = encrypted[:-1] + ('A' if encrypted[-1] != 'A' else 'B')
+        crypto.decrypt(tampered)
+    except Exception as e:
+        print("\n⚠️ Tampering detected:", e)
+------------------------------------------------------------
+app.py
+
+# app.py
+
+from flask import Flask, render_template, request, redirect, session, url_for
+import sqlite3
+import os
+import random
+from datetime import datetime
+
+app = Flask(__name__)
+app.secret_key = 'super_secure_secret_key'  # change this in production
+
+DB_NAME = 'db.sqlite3'
+
+# ---------- DATABASE SETUP ----------
+def init_db():
+    with sqlite3.connect(DB_NAME) as db:
+        cur = db.cursor()
+        # Users table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                user_key TEXT UNIQUE NOT NULL
+            )
+        ''')
+        # Messages table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_key TEXT NOT NULL,
+                receiver_key TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            )
+        ''')
+
+init_db()
+
+# ---------- ROUTES ----------
+@app.route('/')
+def home():
+    if 'user_key' in session:
+        return redirect('/chat')
+    return redirect('/login')
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        confirm = request.form['confirm']
+        if password != confirm:
+            return 'Passwords do not match.'
+        key = str(random.randint(1000, 9999))
+        try:
+            with sqlite3.connect(DB_NAME) as db:
+                cur = db.cursor()
+                cur.execute('INSERT INTO users (email, password, user_key) VALUES (?, ?, ?)',
+                            (email, password, key))
+                db.commit()
+            return redirect('/login')
+        except sqlite3.IntegrityError:
+            return 'Email already exists or key collision. Try again.'
+    return render_template('signup.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        with sqlite3.connect(DB_NAME) as db:
+            cur = db.cursor()
+            cur.execute('SELECT user_key FROM users WHERE email=? AND password=?',
+                        (email, password))
+            result = cur.fetchone()
+            if result:
+                session['user_key'] = result[0]
+                return redirect('/chat')
+            else:
+                return 'Invalid credentials.'
+    return render_template('login.html')
+
+@app.route('/chat', methods=['GET', 'POST'])
+def chat():
+    if 'user_key' not in session:
+        return redirect('/login')
+
+    user_key = session['user_key']
+    messages = []
+    
+    with sqlite3.connect(DB_NAME) as db:
+        cur = db.cursor()
+        cur.execute('SELECT sender_key, content, timestamp FROM messages WHERE receiver_key=? ORDER BY id DESC', (user_key,))
+        messages = cur.fetchall()
+
+    return render_template('index.html', key=user_key, messages=messages)
+
+@app.route('/send', methods=['POST'])
+def send():
+    if 'user_key' not in session:
+        return redirect('/login')
+    
+    receiver = request.form['receiver']
+    content = request.form['content']
+    sender = session['user_key']
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    with sqlite3.connect(DB_NAME) as db:
+        cur = db.cursor()
+        cur.execute('INSERT INTO messages (sender_key, receiver_key, content, timestamp) VALUES (?, ?, ?, ?)',
+                    (sender, receiver, content, timestamp))
+        db.commit()
+    return redirect('/chat')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
+# ---------- RUN ----------
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+---------------------------------------------
+STATIC FOLDER 
+index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Chat | SecureKey</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="chat-body">
+    <div class="chat-wrapper">
+        <!-- SIDEBAR / INFO -->
+        <div class="chat-sidebar">
+            <h2 class="chat-title">🔐 SecureKey</h2>
+            <div class="user-info">
+                <p><strong>Your Key:</strong></p>
+                <span class="user-key">{{ key }}</span>
+                <a class="logout-link" href="/logout">Logout</a>
+            </div>
+
+            <form method="POST" action="/send" class="send-form">
+                <label for="receiver">To Key:</label>
+                <input type="text" name="receiver" id="receiver" placeholder="e.g. 4821" required>
+
+                <label for="content">Message:</label>
+                <textarea name="content" id="content" placeholder="Write a secure message..." required></textarea>
+
+                <button type="submit">Send 🔒</button>
+            </form>
+        </div>
+
+        <!-- MESSAGES -->
+        <div class="chat-messages">
+            <h3>💬 Messages</h3>
+
+            <div class="message-section">
+                <h4 class="section-label">Received</h4>
+                {% for msg in received %}
+                    <div class="message received">
+                        <p><strong>{{ msg[0] }}</strong> → <em>{{ msg[2] }}</em></p>
+                        <div class="message-text">{{ msg[1] }}</div>
+                    </div>
+                {% endfor %}
+            </div>
+
+            <div class="message-section">
+                <h4 class="section-label">Sent</h4>
+                {% for msg in sent %}
+                    <div class="message sent">
+                        <p>To <strong>{{ msg[0] }}</strong> → <em>{{ msg[2] }}</em></p>
+                        <div class="message-text">{{ msg[1] }}</div>
+                    </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+
+-------------------------------------------------------------
+login.html
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Login — CipherChat</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0a0a0a;
+      color: #eee;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    .container {
+      background: #181818;
+      border: 1px solid #303030;
+      padding: 40px;
+      border-radius: 14px;
+      width: 360px;
+      box-shadow: 0 0 25px rgba(0, 255, 160, 0.12);
+    }
+
+    h2 {
+      text-align: center;
+      color: #00ffaa;
+      margin-bottom: 30px;
+      font-size: 26px;
+      letter-spacing: 0.5px;
+    }
+
+    form label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 14px;
+      font-weight: bold;
+      color: #cccccc;
+    }
+
+    input[type="email"],
+    input[type="password"] {
+      width: 100%;
+      padding: 12px;
+      margin-bottom: 20px;
+      background: #222;
+      border: 1px solid #444;
+      color: #fff;
+      border-radius: 8px;
+      font-size: 15px;
+      transition: 0.3s ease;
+    }
+
+    input:focus {
+      border-color: #00ffaa;
+      outline: none;
+      background-color: #2a2a2a;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 12px;
+      background-color: #00ffaa;
+      border: none;
+      color: #111;
+      font-size: 15px;
+      font-weight: bold;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: 0.2s ease-in-out;
+    }
+
+    .btn:hover {
+      background-color: #00cc88;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 20px;
+      font-size: 13px;
+      color: #aaa;
+    }
+
+    .footer a {
+      color: #00ffaa;
+      text-decoration: none;
+    }
+
+    .error {
+      background-color: #501414;
+      color: #fff;
+      padding: 10px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+      text-align: center;
+      font-size: 14px;
+    }
+
+    .secure-tag {
+      font-size: 13px;
+      color: #777;
+      text-align: center;
+      margin-bottom: 15px;
+    }
+
+    .secure-tag::before {
+      content: '🔐 ';
+    }
+
+    .made-by {
+      margin-top: 20px;
+      text-align: center;
+      font-size: 11px;
+      color: #888;
+    }
+
+    .made-by span {
+      color: #00ffaa;
+      font-weight: 500;
+    }
+
+    .made-by hr {
+      border: none;
+      border-top: 1px solid #333;
+      margin: 20px 0 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Secure Login</h2>
+
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+
+    <div class="secure-tag">End-to-End AES Encrypted Session</div>
+
+    <form method="POST">
+      <label for="email">📧 Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <label for="password">🔑 Password</label>
+      <input type="password" id="password" name="password" required />
+
+      <button class="btn" type="submit">🛡️ Unlock Access</button>
+    </form>
+
+    <div class="footer">
+      Don’t have an account? <a href="/signup">Sign Up</a><br/>
+      <span style="font-size: 11px;">CipherChat | Privacy First™</span>
+    </div>
+
+    <div class="made-by">
+      <hr>
+      <div>Crafted with precision by <span>TheSh</span></div>
+    </div>
+  </div>
+</body>
+</html>
+
+--------------------------------------------------------------
+signup.html
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sign Up — CipherChat</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0f0f0f;
+      color: #eee;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    .container {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      padding: 40px;
+      border-radius: 12px;
+      width: 380px;
+      box-shadow: 0 0 30px rgba(0, 255, 0, 0.15);
+    }
+
+    h2 {
+      text-align: center;
+      color: #00ff9d;
+      margin-bottom: 30px;
+      font-size: 26px;
+    }
+
+    form label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 14px;
+      font-weight: bold;
+      color: #cccccc;
+    }
+
+    input[type="email"],
+    input[type="password"] {
+      width: 100%;
+      padding: 12px;
+      margin-bottom: 20px;
+      background: #252525;
+      border: 1px solid #444;
+      color: #fff;
+      border-radius: 8px;
+      font-size: 15px;
+      transition: 0.3s ease;
+    }
+
+    input:focus {
+      border-color: #00ff9d;
+      outline: none;
+      background-color: #2f2f2f;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 12px;
+      background-color: #00ff9d;
+      border: none;
+      color: #111;
+      font-size: 15px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: 0.2s ease-in-out;
+    }
+
+    .btn:hover {
+      background-color: #00cc82;
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 20px;
+      font-size: 13px;
+      color: #aaa;
+    }
+
+    .footer a {
+      color: #00ff9d;
+      text-decoration: none;
+    }
+
+    .error {
+      background-color: #660000;
+      color: #fff;
+      padding: 10px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+      text-align: center;
+      font-size: 14px;
+    }
+
+    .secure-tag {
+      font-size: 13px;
+      color: #777;
+      text-align: center;
+      margin-bottom: 15px;
+    }
+
+    .secure-tag::before {
+      content: '🔒 ';
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Create Your Secure Account</h2>
+
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+
+    <div class="secure-tag">Protected by End-to-End Encryption</div>
+
+    <form method="POST">
+      <label for="email">📧 Email Address</label>
+      <input type="email" id="email" name="email" required />
+
+      <label for="password">🔑 Password</label>
+      <input type="password" id="password" name="password" required />
+
+      <label for="confirm">🔁 Confirm Password</label>
+      <input type="password" id="confirm" name="confirm" required />
+
+      <button class="btn" type="submit">🚀 Register</button>
+    </form>
+
+    <div class="footer">
+      Already have an account? <a href="/login">Log In</a><br/>
+      <span style="font-size: 11px;">Version 2.0 | Military-grade AES-256 encrypted</span>
+    </div>
+  </div>
+</body>
+</html>
+
+--------------------------------------------------------------------------------
+
+STATIC FOLDER
+style.css
+
+/* Base reset */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #0f0f0f;
+    color: #f1f1f1;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* ---------- AUTH PAGES ---------- */
+.auth-body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    background: linear-gradient(135deg, #0a0a0a, #141414);
+}
+
+.auth-wrapper {
+    background: rgba(25, 25, 25, 0.85);
+    backdrop-filter: blur(10px);
+    padding: 40px;
+    border-radius: 16px;
+    box-shadow: 0 0 20px #0ff;
+    max-width: 400px;
+    width: 90%;
+    text-align: center;
+}
+
+.auth-box h1,
+.auth-box h2 {
+    margin-bottom: 10px;
+    font-size: 1.8rem;
+    color: #0ff;
+}
+
+.auth-subtitle {
+    margin-bottom: 20px;
+    color: #888;
+    font-size: 0.95rem;
+}
+
+.auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    text-align: left;
+}
+
+.auth-form label {
+    font-size: 0.9rem;
+    color: #aaa;
+}
+
+.auth-form input {
+    padding: 10px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #fff;
+    border-radius: 6px;
+    outline: none;
+    transition: 0.2s ease;
+}
+
+.auth-form input:focus {
+    border-color: #0ff;
+    background: #111;
+}
+
+.auth-button {
+    padding: 12px;
+    background: #0ff;
+    border: none;
+    border-radius: 6px;
+    color: #000;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.auth-button:hover {
+    background: #00e5e5;
+}
+
+.auth-footer {
+    margin-top: 15px;
+    font-size: 0.85rem;
+    color: #aaa;
+}
+
+.auth-footer a {
+    color: #0ff;
+    text-decoration: none;
+}
+
+/* ---------- CHAT PAGE ---------- */
+.chat-body {
+    display: flex;
+    height: 100vh;
+}
+
+.chat-wrapper {
+    display: flex;
+    width: 100%;
+}
+
+/* Sidebar (left panel) */
+.chat-sidebar {
+    width: 280px;
+    background: #141414;
+    padding: 30px 20px;
+    border-right: 1px solid #222;
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+}
+
+.chat-title {
+    color: #0ff;
+    font-size: 1.5rem;
+    margin-bottom: 10px;
+}
+
+.user-info {
+    background: #1c1c1c;
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 0.95rem;
+}
+
+.user-key {
+    display: block;
+    font-size: 1.3rem;
+    color: #0ff;
+    margin: 8px 0;
+}
+
+.logout-link {
+    display: inline-block;
+    margin-top: 5px;
+    color: #f55;
+    font-size: 0.85rem;
+    text-decoration: none;
+}
+
+/* Send form */
+.send-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.send-form input,
+.send-form textarea {
+    padding: 10px;
+    border: 1px solid #333;
+    background: #1a1a1a;
+    color: #fff;
+    border-radius: 6px;
+}
+
+.send-form textarea {
+    height: 80px;
+    resize: none;
+}
+
+.send-form button {
+    padding: 10px;
+    background: #0ff;
+    border: none;
+    border-radius: 6px;
+    color: #000;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+/* Chat area (right panel) */
+.chat-messages {
+    flex: 1;
+    padding: 30px;
+    overflow-y: auto;
+    background: #101010;
+}
+
+.chat-messages h3 {
+    font-size: 1.2rem;
+    margin-bottom: 20px;
+    color: #0ff;
+}
+
+.message-section {
+    margin-bottom: 30px;
+}
+
+.section-label {
+    margin-bottom: 10px;
+    font-size: 1rem;
+    color: #999;
+}
+
+.message {
+    background: #1c1c1c;
+    padding: 12px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+
+.message.sent {
+    border-left: 4px solid #0ff;
+    background: #121d1d;
+}
+
+.message.received {
+    border-left: 4px solid #0f0;
+    background: #1d1212;
+}
+
+.message p {
+    font-size: 0.85rem;
+    margin-bottom: 6px;
+    color: #aaa;
+}
+
+.message-text {
+    font-size: 1rem;
+    color: #fff;
+}
+-------------------------------------------------------------
+
+
+
+1. 📦 Install Required Packages
+Open terminal in the project folder and run:
+
+bash
+Copy
+Edit
+pip install flask
+Optional but recommended:
+
+bash
+Copy
+Edit
+pip install flask-session
+If you're using a venv:
+
+bash
+Copy
+Edit
+python3 -m venv venv
+source venv/bin/activate  # (Linux/macOS)
+venv\Scripts\activate     # (Windows)
+2. 🗂️ Folder Structure Should Look Like This:
+cpp
+Copy
+Edit
+securechat/
+├── app.py
+├── db.sqlite3 (auto-created)
+├── templates/
+│   ├── login.html
+│   ├── signup.html
+│   └── index.html
+├── static/
+│   └── style.css
+└── .gitignore
+Make sure:
+
+templates/ contains all the .html files
+
+static/ contains style.css (your UI styling)
+
+app.py is at the root
+
+
